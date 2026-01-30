@@ -25,37 +25,64 @@ jobs:
           echo "name=$WORKSPACE_NAME" >> $GITHUB_OUTPUT
           echo "Derived workspace: $WORKSPACE_NAME"
       
-      - name: Get HCP Terraform info
+      - name: Wait for TFC_TOKEN secret and fetch info
         id: tfc
         env:
           TFC_TOKEN: ${{ secrets.TFC_TOKEN }}
         run: |
-          set -e
           ORG="ghdemo"
           WS_NAME="${{ steps.workspace.outputs.name }}"
           
-          echo "Fetching workspace: $WS_NAME"
-          WS_DATA=$(curl -sf \
-            -H "Authorization: Bearer $TFC_TOKEN" \
-            "https://app.terraform.io/api/v2/organizations/$ORG/workspaces/$WS_NAME")
+          for attempt in {1..24}; do
+            echo "Attempt $attempt of 24..."
+            
+            if [ -z "$TFC_TOKEN" ]; then
+              echo "TFC_TOKEN not available yet, waiting..."
+              sleep 10
+              continue
+            fi
+            
+            echo "Fetching workspace: $WS_NAME"
+            WS_DATA=$(curl -s \
+              -H "Authorization: Bearer $TFC_TOKEN" \
+              "https://app.terraform.io/api/v2/organizations/$ORG/workspaces/$WS_NAME")
+            
+            WS_ID=$(echo "$WS_DATA" | jq -r '.data.id // empty')
+            
+            if [ -z "$WS_ID" ]; then
+              echo "Workspace not found yet, waiting..."
+              sleep 10
+              continue
+            fi
+            
+            CREATED=$(echo "$WS_DATA" | jq -r '.data.attributes."created-at"')
+            echo "Workspace ID: $WS_ID"
+            
+            echo "Fetching runs for workspace: $WS_ID"
+            RUN_DATA=$(curl -s \
+              -H "Authorization: Bearer $TFC_TOKEN" \
+              "https://app.terraform.io/api/v2/workspaces/$WS_ID/runs?page%5Bsize%5D=1")
+            
+            RUN_ID=$(echo "$RUN_DATA" | jq -r '.data[0].id // empty')
+            RUN_STATUS=$(echo "$RUN_DATA" | jq -r '.data[0].attributes.status // empty')
+            
+            if [ -z "$RUN_ID" ]; then
+              echo "No runs found yet, waiting..."
+              sleep 10
+              continue
+            fi
+            
+            echo "Run ID: $RUN_ID, Status: $RUN_STATUS"
+            
+            echo "ws_id=$WS_ID" >> $GITHUB_OUTPUT
+            echo "ws_created=$CREATED" >> $GITHUB_OUTPUT
+            echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+            echo "run_status=$RUN_STATUS" >> $GITHUB_OUTPUT
+            exit 0
+          done
           
-          WS_ID=$(echo "$WS_DATA" | jq -r '.data.id')
-          CREATED=$(echo "$WS_DATA" | jq -r '.data.attributes."created-at"')
-          echo "Workspace ID: $WS_ID"
-          
-          echo "Fetching runs for workspace: $WS_ID"
-          RUN_DATA=$(curl -sf \
-            -H "Authorization: Bearer $TFC_TOKEN" \
-            "https://app.terraform.io/api/v2/workspaces/$WS_ID/runs?page%5Bsize%5D=1")
-          
-          RUN_ID=$(echo "$RUN_DATA" | jq -r '.data[0].id')
-          RUN_STATUS=$(echo "$RUN_DATA" | jq -r '.data[0].attributes.status')
-          echo "Run ID: $RUN_ID, Status: $RUN_STATUS"
-          
-          echo "ws_id=$WS_ID" >> $GITHUB_OUTPUT
-          echo "ws_created=$CREATED" >> $GITHUB_OUTPUT
-          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "run_status=$RUN_STATUS" >> $GITHUB_OUTPUT
+          echo "Failed to fetch HCP Terraform info after 4 minutes"
+          exit 1
       
       - name: Generate README
         env:
